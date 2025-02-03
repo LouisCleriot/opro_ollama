@@ -68,6 +68,13 @@ _OPENAI_API_KEY = flags.DEFINE_string(
 
 _PALM_API_KEY = flags.DEFINE_string("palm_api_key", "", "The PaLM API key.")
 
+_OLLAMA_MODEL = flags.DEFINE_string(
+    "ollama_model", "", "The name of the Ollama model to use."
+)
+_OLLAMA_BASE_URL = flags.DEFINE_string(
+    "ollama_base_url", "http://localhost:11434", "The base URL for Ollama API."
+)
+
 _SCORER = flags.DEFINE_string(
     "scorer", "text-bison", "The name of the scorer LLM."
 )
@@ -114,7 +121,8 @@ def main(_):
       "mmlu",
       "bbh",
       "gsm8k",
-  }, "The lower-case dataset name must be one of mmlu, bbh, or gsm8k."
+      "aime"
+  }, "The lower-case dataset name must be one of mmlu, bbh, aime or gsm8k."
   if dataset_name == "mmlu":
     assert task_name in {
         "STEM",
@@ -152,6 +160,11 @@ def main(_):
         "web_of_lies",
         "word_sorting",
     }
+  elif dataset_name == "aime":
+    assert task_name in {
+        "train",
+        "test",
+    }
   else:
     assert dataset_name == "gsm8k"
     assert task_name in {"train", "test"}
@@ -160,12 +173,12 @@ def main(_):
       "text-bison",
       "gpt-3.5-turbo",
       "gpt-4",
-  }
+  } or scorer_llm_name.startswith("ollama:")
   assert optimizer_llm_name in {
       "text-bison",
       "gpt-3.5-turbo",
       "gpt-4",
-  }
+  }  or optimizer_llm_name.startswith("ollama:")
   assert meta_prompt_type in {
       "both_instructions_and_exemplars",
       "instructions_only",
@@ -191,22 +204,28 @@ def main(_):
   if scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
     assert openai_api_key, "The OpenAI API key must be provided."
     openai.api_key = openai_api_key
-  else:
-    assert scorer_llm_name == "text-bison"
+  elif scorer_llm_name == "text-bison":
     assert (
         palm_api_key
     ), "A PaLM API key is needed when prompting the text-bison model."
     palm.configure(api_key=palm_api_key)
+  else :
+    assert scorer_llm_name.startswith('ollama:')
+    assert _OLLAMA_MODEL.value, "An Ollama model name must be provided when using Ollama."
+    scorer_llm_name = scorer_llm_name.split(':')[1]
 
   if optimizer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
     assert openai_api_key, "The OpenAI API key must be provided."
     openai.api_key = openai_api_key
-  else:
-    assert optimizer_llm_name == "text-bison"
+  elif optimizer_llm_name == "text-bison":
     assert (
         palm_api_key
     ), "A PaLM API key is needed when prompting the text-bison model."
     palm.configure(api_key=palm_api_key)
+  else:
+    assert optimizer_llm_name.startswith('ollama:')
+    assert _OLLAMA_MODEL.value, "An Ollama model name must be provided when using Ollama."
+    optimizer_llm_name = optimizer_llm_name.split(':')[1]
 
   if dataset_name == "mmlu":
     root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "MMLU-data")
@@ -214,6 +233,8 @@ def main(_):
     root_data_folder_path = os.path.join(
         ROOT_DATA_FOLDER_PATH, "BIG-Bench-Hard-data/"
     )
+  elif dataset_name == "aime":
+    root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "aime-data")
   else:
     assert dataset_name == "gsm8k"
     root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "gsm_data")
@@ -274,8 +295,7 @@ def main(_):
     scorer_llm_dict.update(scorer_finetuned_palm_dict)
     call_scorer_server_func = call_scorer_finetuned_palm_server_func
 
-  else:
-    assert scorer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}
+  elif scorer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
     scorer_gpt_max_decode_steps = 1024
     scorer_gpt_temperature = 0.0
 
@@ -296,6 +316,25 @@ def main(_):
         max_decode_steps=scorer_gpt_max_decode_steps,
         temperature=scorer_gpt_temperature,
     )
+  else:
+    scorer_ollama_dict = dict()
+    scorer_ollama_dict["temperature"] = 1.0  # Low temp for scoring
+    scorer_ollama_dict["num_servers"] = 1
+    scorer_ollama_dict["batch_size"] = 1
+    scorer_ollama_dict["max_decode_steps"] = 8192
+
+    scorer_llm_dict = {
+        "model_type": "ollama",
+    }
+    scorer_llm_dict.update(scorer_ollama_dict)
+    call_scorer_server_func = functools.partial(
+        prompt_utils.call_ollama_server_func,
+        model=_OLLAMA_MODEL.value,
+        base_url=_OLLAMA_BASE_URL.value,
+        max_decode_steps=scorer_ollama_dict["max_decode_steps"],
+        temperature=scorer_ollama_dict["temperature"],
+    )
+
 
   # ====================== optimizer model configs ============================
   if optimizer_llm_name.lower() == "text-bison":
@@ -335,8 +374,7 @@ def main(_):
     optimizer_llm_dict.update(optimizer_finetuned_palm_dict)
     call_optimizer_server_func = call_optimizer_finetuned_palm_server_func
 
-  else:
-    assert optimizer_llm_name in {"gpt-3.5-turbo", "gpt-4"}
+  elif optimizer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
     optimizer_gpt_max_decode_steps = 512
     optimizer_gpt_temperature = 1.0
 
@@ -351,7 +389,27 @@ def main(_):
         max_decode_steps=optimizer_gpt_max_decode_steps,
         temperature=optimizer_gpt_temperature,
     )
+  else: 
+    # Ollama model
+    optimizer_ollama_dict = dict()
+    optimizer_ollama_dict["temperature"] = 1.0
+    optimizer_ollama_dict["num_decodes"] = 8
+    optimizer_ollama_dict["max_decode_steps"] = 8192
+    optimizer_ollama_dict["batch_size"] = 1
+    optimizer_ollama_dict["num_servers"] = 1
 
+    optimizer_llm_dict = {
+        "model_type": "ollama",
+    }
+    optimizer_llm_dict.update(optimizer_ollama_dict)
+    call_optimizer_server_func = functools.partial(
+        prompt_utils.call_ollama_server_func,
+        model=_OLLAMA_MODEL.value,
+        base_url=_OLLAMA_BASE_URL.value,
+        max_decode_steps=optimizer_ollama_dict["max_decode_steps"],
+        temperature=optimizer_ollama_dict["temperature"],
+    )
+  
   # ====================== try calling the servers ============================
   print("\n======== testing the scorer and optimizer servers ===========")
   scorer_test_output = call_scorer_server_func(
@@ -574,7 +632,11 @@ def main(_):
         "sports_understanding",  # yes or no
         "web_of_lies",  # yes or no
     }
-
+  elif dataset_name == "aime":
+    tasks_all = [task_name]
+    multiple_choice_tasks = set()
+    boolean_tasks = set()
+    numerical_output_tasks = set(tasks_all)
   else:
     assert dataset_name in {"gsm8k"}
     tasks_all = [task_name]
@@ -598,6 +660,10 @@ def main(_):
         f"prediction_treat_as_number: {prediction_treat_as_number},"
         f" prediction_treat_as_bool: {prediction_treat_as_bool}"
     )
+  elif dataset_name == "aime":
+    raw_data = pd.DataFrame()
+    prediction_treat_as_number = True
+    prediction_treat_as_bool = False
   else:
     assert dataset_name == "gsm8k"
     raw_data = pd.DataFrame()
@@ -620,6 +686,11 @@ def main(_):
           task_name, base_dir=root_data_folder_path
       )
       raw_data += single_task_list
+    elif dataset_name == "aime":
+      task_name = t
+      f_aime = os.path.join(root_data_folder_path, f"aime_{task_name}.csv")
+      single_task_df = pd.read_csv(f_aime)
+      raw_data = pd.concat([raw_data, single_task_df])
     else:
       assert dataset_name == "gsm8k"
       task_name = t
@@ -631,6 +702,8 @@ def main(_):
     num_examples = raw_data.shape[0]
   elif dataset_name == "bbh":
     num_examples = len(raw_data)
+  elif dataset_name == "aime":
+    num_examples = raw_data.shape[0]
   else:
     assert dataset_name in {"gsm8k"}
     num_examples = raw_data.shape[0]
@@ -641,8 +714,11 @@ def main(_):
     train_ratio = 0.8
     eval_ratio = 0.2
   elif dataset_name == "gsm8k":
-    train_ratio = 0.035
+    train_ratio = 0.35
     eval_ratio = 0
+  elif dataset_name == "aime":
+    train_ratio = 0.03
+    eval_ratio = 0.03
   else:
     assert dataset_name == "bbh"
     train_ratio = 0.2
@@ -653,6 +729,7 @@ def main(_):
   # Boolean variables match the data points.
   assert train_ratio + eval_ratio <= 1
   test_ratio = 1 - train_ratio - eval_ratio
+  test_ratio = 0.0
   print(
       f"train_ratio: {train_ratio}, eval_ratio: {eval_ratio}, "
       f"test_ratio: {test_ratio}"
@@ -682,16 +759,20 @@ def main(_):
   if scorer_llm_name == "text-bison":
     old_instruction_score_threshold = 0.0
     # old_instruction_score_threshold = 0.15  # for GSM8K
-  else:
-    assert scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}
+  elif scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
     old_instruction_score_threshold = 0.3
+  else:
+    old_instruction_score_threshold = 0.0
 
   if scorer_llm_name == "text-bison":
     extract_final_answer_by_prompting_again = False
     include_qa = False
     evaluate_in_parallel = False
+  elif scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
+    extract_final_answer_by_prompting_again = False
+    include_qa = False
+    evaluate_in_parallel = False
   else:
-    assert scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}
     extract_final_answer_by_prompting_again = False
     include_qa = False
     evaluate_in_parallel = False
@@ -704,11 +785,17 @@ def main(_):
   # edit the value of the variable below, instead of editing the number of
   # decodes in model parameters, because those values are limited by model
   # serving configs.
-  num_generated_instructions_in_each_step = 8
-  num_search_steps = 200
+  num_generated_instructions_in_each_step = 4
+  num_search_steps = 10
 
   initial_instructions = [
-      "Let's solve the problem.",
+      ("Solve in this strict format:"
+        "[Problem Interpretation]"
+        "[Step 1] <Reasoning>"
+        "[Check] <Validation method>"
+        "[Step N] <Final computation modulo 1000>"
+        "[Consistency Proof] <Argue solution ≡ answer mod 1000>"
+        "Return only the \\boxed{} result."),
       # "",
       # "The answer is",
   ]

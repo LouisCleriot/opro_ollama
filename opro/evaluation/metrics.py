@@ -210,6 +210,13 @@ def get_normalized_prediction(prediction: str,
 
   prediction_parsed = prediction.lower().strip()
 
+  # Add handling for \boxed{} format answers
+  if r"\boxed" in prediction_parsed:
+    try:
+      prediction_parsed = re.findall(r"\\boxed{(.*?)}", prediction_parsed)[0]
+    except:
+      prediction_parsed = prediction_parsed
+
   FINAL_ANSWER_BEHIND_PATTERNS = (  # pylint: disable=invalid-name
       FINAL_ANSWER_BEHIND_PATTERNS_PRIMARY  # pylint: disable=g-long-ternary
       if any(

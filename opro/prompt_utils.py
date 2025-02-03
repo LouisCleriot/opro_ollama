@@ -16,6 +16,7 @@
 import time
 import google.generativeai as palm
 import openai
+import requests
 
 
 def call_openai_server_single_prompt(
@@ -130,3 +131,77 @@ def call_palm_server_from_cloud(
     return call_palm_server_from_cloud(
         input_text, max_decode_steps=max_decode_steps, temperature=temperature
     )
+
+def call_ollama_server_single_prompt(
+    prompt, 
+    model="llama2", 
+    max_decode_steps=8192, 
+    temperature=1.0,
+    base_url="http://localhost:11434"
+):
+    """Function to call Ollama server with an input string."""
+    try:
+        response = requests.post(
+            f"{base_url}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_decode_steps,
+                    "num_ctx": 131072,
+                },
+                "stream": False  # Important: disable streaming to get single response
+            },
+        )
+        response.raise_for_status()
+        
+        # Parse the single JSON response
+        response_json = response.json()
+        return response_json.get("response", "")
+
+    except requests.exceptions.RequestException as e:
+        retry_time = 5  # Default retry time
+        print(f"Ollama API error occurred: {e}. Retrying in {retry_time} seconds...")
+        time.sleep(retry_time)
+        return call_ollama_server_single_prompt(
+            prompt,
+            model=model,
+            max_decode_steps=max_decode_steps,
+            temperature=temperature,
+            base_url=base_url
+        )
+    except json.JSONDecodeError as e:
+        retry_time = 5
+        print(f"JSON parsing error: {e}. Retrying in {retry_time} seconds...")
+        time.sleep(retry_time)
+        return call_ollama_server_single_prompt(
+            prompt,
+            model=model,
+            max_decode_steps=max_decode_steps,
+            temperature=temperature,
+            base_url=base_url
+        )
+
+def call_ollama_server_func(
+    inputs,
+    model="llama2",
+    max_decode_steps=8192,
+    temperature=1.0,
+    base_url="http://localhost:11434",
+    server_index=1  # Added to match other server function signatures
+):
+    """Function to call Ollama server with a list of input strings."""
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    outputs = []
+    for input_str in inputs:
+        output = call_ollama_server_single_prompt(
+            input_str,
+            model=model,
+            max_decode_steps=max_decode_steps,
+            temperature=temperature,
+            base_url=base_url
+        )
+        outputs.append(output)
+    return outputs

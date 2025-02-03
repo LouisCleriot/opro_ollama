@@ -75,15 +75,11 @@ def remove_punctuation_from_string(input_string, is_filename=True):
 
 def instruction_to_filename(instruction, md5_hashing=True):
   """Convert an instruction string to filename."""
-  if md5_hashing:
-    m = hashlib.md5()
-    m.update(instruction.encode("ascii"))
-    filename = m.hexdigest()
-  else:
-    # remove punctuations and line break, and give a name to the empty string
-    filename = instruction.replace("\n", "")
-    filename = remove_punctuation_from_string(repr(filename))
-    filename = filename if filename else "<NO INSTRUCTION>"
+  # remove punctuations and line break, and give a name to the empty string
+  filename = instruction.replace("\n", "")
+  filename = instruction.replace("\\", "")
+  filename = remove_punctuation_from_string(repr(filename))
+  filename = filename if filename else "<NO INSTRUCTION>"
   return filename
 
 
@@ -194,9 +190,10 @@ def gen_prompt(
       "gsm8k",
       "multiarith",
       "aqua",
+      "aime",
   }, (
       "The lower-case dataset name must be one of mmlu, bbh, gsm8k, multiarith,"
-      " or aqua."
+      " aime or aqua."
   )
   assert instruction_pos in {
       "before_Q",
@@ -216,6 +213,8 @@ def gen_prompt(
     question = data.iloc[idx, 0]
   elif dataset_name == "multiarith":
     question = data[idx]["sQuestion"].strip()
+  elif dataset_name == "aime":
+    question = data.iloc[idx]["Problem"]
   else:
     assert dataset_name == "aqua"
     question = _format_aqua_example(data, idx)
@@ -268,9 +267,10 @@ def fetch_true_answer(data, idx, dataset_name):
       "gsm8k",
       "multiarith",
       "aqua",
+      "aime",
   }, (
       "The lower-case dataset name must be one of mmlu, bbh, gsm8k, multiarith,"
-      " or aqua."
+      "aime or aqua."
   )
   if dataset_name == "mmlu":
     return data.iloc[idx, -1]
@@ -280,6 +280,10 @@ def fetch_true_answer(data, idx, dataset_name):
     return data.iloc[idx, 1]
   elif dataset_name == "multiarith":
     return int(data[idx]["lSolutions"][0])
+  elif dataset_name == "aime":
+    dat= data.iloc[idx]["Answer"]
+    answer = re.search(r"\\boxed{(.*?)}", dat).group(1)
+    return answer
   else:
     assert dataset_name == "aqua"
     return data[idx]["correct"]
@@ -552,7 +556,7 @@ def evaluate_single_instruction(
     prediction_treat_as_number=False,
     prediction_treat_as_bool=False,
     prediction_num_decimals=0,
-    is_gpt_model=False,
+    is_gpt_model=True,
     verbose=False,
 ):
   r"""Evaluate a single instruction on the given indices of the given data.
@@ -600,6 +604,8 @@ def evaluate_single_instruction(
     and accuracies. Columns are ['raw_prompt', 'raw_answer', 'parsed_answer',
     'true_answer', 'accuracy'].
   """
+  from tqdm import tqdm
+  is_gpt_model = True
   assert prediction_treat_as_number == "adaptive" or isinstance(
       prediction_treat_as_number, bool
   )
@@ -703,9 +709,12 @@ def evaluate_single_instruction(
         call_server_local_func=call_server_func,
     )
   else:  # no parallelism in first round
-    raw_answers = [
-        call_server_func(prompt)[0] for prompt in raw_prompts_flattened
-    ]
+    raw_answers = []
+    for prompt in tqdm(raw_prompts_flattened):
+      response = call_server_func(prompt)
+      print(response)
+      raw_answers.append(response[0])
+
 
   if verbose:
     print("first round of prompting finished")
@@ -789,8 +798,11 @@ def evaluate_single_instruction(
       x, is_gpt_model, treat_as_number, num_decimals, treat_as_bool
   ):
     if is_gpt_model and r"\boxed" in x:
+      print("===================parsing boxed======================")
+      print(re.findall(r"\\boxed{(.*?)}", x)[0])
       return re.findall(r"\\boxed{(.*?)}", x)[0]
     else:
+      print("===================parsing normal======================")
       return metrics.get_normalized_prediction(
           x,
           treat_as_number=treat_as_number,

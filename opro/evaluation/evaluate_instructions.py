@@ -66,6 +66,13 @@ _OPENAI_API_KEY = flags.DEFINE_string(
 
 _PALM_API_KEY = flags.DEFINE_string("palm_api_key", "", "The PaLM API key.")
 
+_OLLAMA_MODEL = flags.DEFINE_string(
+    "ollama_model", "", "The name of the Ollama model to use."
+)
+_OLLAMA_BASE_URL = flags.DEFINE_string(
+    "ollama_base_url", "http://localhost:11434", "The base URL for Ollama API."
+)
+
 _SCORER = flags.DEFINE_string(
     "scorer", "text-bison", "The name of the scorer LLM."
 )
@@ -128,9 +135,10 @@ def main(_):
       "gsm8k",
       "multiarith",
       "aqua",
+      "aime",
   }, (
       "The lower-case dataset name must be one of mmlu, bbh, gsm8k, multiarith,"
-      " or aqua."
+      " aime or aqua."
   )
   if dataset_name == "mmlu":
     assert task_name in {
@@ -171,26 +179,31 @@ def main(_):
     }
   elif dataset_name == "gsm8k":
     assert task_name in {"train", "test"}
+  elif dataset_name == "aime":
+    assert task_name in {"train", "test"}
   else:
     assert dataset_name in {"multiarith", "aqua"}
     assert task_name == "self"
 
   assert scorer_llm_name in {
-      "text-bison",
-      "gpt-3.5-turbo",
-      "gpt-4",
-  }
+    "text-bison",
+    "gpt-3.5-turbo", 
+    "gpt-4",
+  } or scorer_llm_name.startswith("ollama:")
 
   # make sure the model is callable
   if scorer_llm_name in {"gpt-3.5-turbo", "gpt-4"}:
     assert openai_api_key, "The OpenAI API key must be provided."
     openai.api_key = openai_api_key
-  else:
-    assert scorer_llm_name == "text-bison"
+  elif scorer_llm_name == "text-bison":
     assert (
         palm_api_key
     ), "A PaLM API key is needed when prompting the text-bison model."
     palm.configure(api_key=palm_api_key)
+  else :
+    assert scorer_llm_name.startswith('ollama:')
+    assert _OLLAMA_MODEL.value, "An Ollama model name must be provided when using Ollama."
+    scorer_llm_name = scorer_llm_name.split(':')[1]
 
   assert instruction_pos in {
       "before_Q",
@@ -215,6 +228,8 @@ def main(_):
     root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "gsm_data")
   elif dataset_name == "aqua":
     root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "AQuA-data")
+  elif dataset_name == "aime":
+    root_data_folder_path = os.path.join(ROOT_DATA_FOLDER_PATH, "aime-data")
   else:
     assert dataset_name == "multiarith"
     root_data_folder_path = ROOT_DATA_FOLDER_PATH
@@ -269,9 +284,8 @@ def main(_):
     scorer_llm_dict.update(scorer_finetuned_palm_dict)
     call_scorer_server_func = call_scorer_finetuned_palm_server_func
 
-  else:
+  elif scorer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
     # GPT models
-    assert scorer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}
     scorer_gpt_max_decode_steps = 1024
     scorer_gpt_temperature = 0.0
 
@@ -291,6 +305,26 @@ def main(_):
         model=scorer_llm_name.lower(),
         max_decode_steps=scorer_gpt_max_decode_steps,
         temperature=scorer_gpt_temperature,
+    )
+  else:
+    # Ollama models
+    assert scorer_llm_name.startswith('ollama:')
+    scorer_ollama_dict = dict()
+    scorer_ollama_dict["temperature"] = 1.0  # Low temp for scoring
+    scorer_ollama_dict["num_servers"] = 1
+    scorer_ollama_dict["batch_size"] = 1
+    scorer_ollama_dict["max_decode_steps"] = 8192
+
+    scorer_llm_dict = {
+        "model_type": "ollama",
+    }
+    scorer_llm_dict.update(scorer_ollama_dict)
+    call_scorer_server_func = functools.partial(
+        prompt_utils.call_ollama_server_func,
+        model=_OLLAMA_MODEL.value,
+        base_url=_OLLAMA_BASE_URL.value,
+        max_decode_steps=scorer_ollama_dict["max_decode_steps"],
+        temperature=scorer_ollama_dict["temperature"],
     )
 
   # ===================== try calling the scorer servers ======================
@@ -507,6 +541,11 @@ def main(_):
     multiple_choice_tasks = set()
     boolean_tasks = set()
     numerical_output_tasks = set(tasks_all)
+  elif dataset_name == "aime":
+    tasks_all = [task_name]
+    multiple_choice_tasks = set()
+    boolean_tasks = set()
+    numerical_output_tasks = set()
   elif dataset_name == "math":
     tasks_all = [task_name]
     multiple_choice_tasks = set()
@@ -585,6 +624,16 @@ def main(_):
       raw_data = pd.DataFrame()
       f_gsm = os.path.join(root_data_folder_path, f"gsm_{task_name}.tsv")
       single_task_df = pd.read_csv(f_gsm, sep="\t", header=None)
+      raw_data = pd.concat([raw_data, single_task_df])
+      prediction_treat_as_number = True
+      prediction_treat_as_bool = False
+      num_examples = raw_data.shape[0]
+      original_index = np.arange(num_examples)
+    elif dataset_name == "aime":
+      task_name = t
+      raw_data = pd.DataFrame()
+      f_aime = os.path.join(root_data_folder_path, f"aime_{task_name}.csv")
+      single_task_df = pd.read_csv(f_aime)
       raw_data = pd.concat([raw_data, single_task_df])
       prediction_treat_as_number = True
       prediction_treat_as_bool = False

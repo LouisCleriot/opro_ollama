@@ -155,6 +155,7 @@ def gen_meta_prompt(
       "mmlu",
       "bbh",
       "gsm8k",
+      "aime",
   }, "The lower-case dataset name must be one of mmlu, bbh, gsm8k."
   assert num_score_buckets == np.inf or isinstance(num_score_buckets, int)
 
@@ -173,13 +174,25 @@ def gen_meta_prompt(
             " Below are some previous instructions with their scores."
             " The score ranges from 0 to 100.\n"
         )
-    else:
-      assert optimizer_llm_name.lower() == "text-bison"
+    elif optimizer_llm_name.lower() == "text-bison":
       meta_prompt_old_instruction_part = (
           "I have some texts along with their corresponding scores."
           " The texts are arranged in ascending order based on their scores,"
           " where higher scores indicate better quality.\n\n"
       )
+    else:
+      if instruction_pos == "A_begin":
+        meta_prompt_old_instruction_part = (
+            "Your task is to generate the answer starting sentence <Start>."
+            " Below are some previous starting sentences with their scores."
+            " The score ranges from 0 to 100.\n"
+        )
+      else:
+        meta_prompt_old_instruction_part = (
+            "Your task is to generate the instruction <INS>."
+            " Below are some previous instructions with their scores."
+            " The score ranges from 0 to 100.\n"
+        )
     # add old instructions
     old_instructions_and_scores_str = gen_ins_and_score_pairs_substr(
         old_instructions_and_scores=old_instructions_and_scores,
@@ -194,8 +207,7 @@ def gen_meta_prompt(
     if few_shot_qa_pairs:
       if optimizer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
         meta_prompt_exemplar_part += "Below are some problems.\n"
-      else:
-        assert optimizer_llm_name.lower() == "text-bison"
+      elif optimizer_llm_name.lower() == "text-bison":
         meta_prompt_exemplar_part += (
             "The following exemplars show how to apply your text: you replace"
             " <INS> in each input with your text, then read the input and give"
@@ -205,6 +217,9 @@ def gen_meta_prompt(
             " piece of text above, we get wrong outputs on the following"
             " inputs.\n\n"
         )
+      else:
+        meta_prompt_exemplar_part += "Below are some problems.\n"
+
       for idx in few_shot_index_list:
         if dataset_name == "mmlu":
           question = eval_utils._format_mmlu_example(data, idx)  # pylint: disable=protected-access
@@ -212,6 +227,9 @@ def gen_meta_prompt(
         elif dataset_name == "bbh":
           question = data[idx]["input"]
           true_answer = data[idx]["target"]
+        elif dataset_name == "aime":
+          question = data.iloc[idx]["Problem"]
+          true_answer = data.iloc[idx]["Answer"]
         else:
           assert dataset_name == "gsm8k"
           question = data.iloc[idx, 0]
@@ -227,30 +245,37 @@ def gen_meta_prompt(
           else:  # instruction_pos == "A_begin"
             if optimizer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
               meta_prompt_exemplar_part += f"\nQ: {question}\nA: <Start>"
-            else:
-              assert optimizer_llm_name.lower() == "text-bison"
+            elif optimizer_llm_name.lower() == "text-bison":
               meta_prompt_exemplar_part += f"\ninput:\nQ: {question}\nA: <INS>"
-        else:  # when there're no "Q:" and "A:" in the prompt
+            else:
+              meta_prompt_exemplar_part += f"\nQ: {question}\nA: <Start>"
+
+        else:  # when "Q:" and "A:" are not present in the prompt
           assert instruction_pos in {"Q_begin", "Q_end"}
           if optimizer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
             if instruction_pos == "Q_begin":
               meta_prompt_exemplar_part += f"\nProblem:\n<INS>\n{question}\n"
             elif instruction_pos == "Q_end":
               meta_prompt_exemplar_part += f"\nProblem:\n{question}\n<INS>\n"
-          else:
-            assert optimizer_llm_name.lower() == "text-bison"
+          elif optimizer_llm_name.lower() == "text-bison":
             if instruction_pos == "Q_begin":
               meta_prompt_exemplar_part += f"\ninput:\n<INS>\n{question}\n"
             elif instruction_pos == "Q_end":
               meta_prompt_exemplar_part += f"\ninput:\n{question}\n<INS>\n"
+          else:
+            if instruction_pos == "Q_begin":
+              meta_prompt_exemplar_part += f"\nProblem:\n<INS>\n{question}\n"
+            elif instruction_pos == "Q_end":
+              meta_prompt_exemplar_part += f"\nProblem:\n{question}\n<INS>\n"
 
         if optimizer_llm_name.lower() in {"gpt-3.5-turbo", "gpt-4"}:
           meta_prompt_exemplar_part += (
               f"\nGround truth answer:\n{true_answer}\n"
           )
-        else:
-          assert optimizer_llm_name.lower() == "text-bison"
+        elif optimizer_llm_name.lower() == "text-bison":
           meta_prompt_exemplar_part += f"\noutput:\n{true_answer}\n"
+        else:
+          meta_prompt_exemplar_part += f"\nGround truth answer:\n{true_answer}\n"
 
     if few_shot_qa_pairs:
       if instructions_before_exemplars:
@@ -287,12 +312,30 @@ def gen_meta_prompt(
             " The instruction should be concise, effective,"
             " and generally applicable to all problems above."
         )
-    else:
-      assert optimizer_llm_name.lower() == "text-bison"
+    elif optimizer_llm_name.lower() == "text-bison":
       meta_prompt += (
           "\n\nWrite your new text that is different from the old ones and"
           " has a score as high as possible. Write the text in square brackets."
       )
+    else : 
+      if instruction_pos == "A_begin":
+        meta_prompt += (
+            "\n\nGenerate a starting sentence that is different from all the"
+            " <Start> sentences above, and has a higher score than all the"
+            " <Start> sentences above. The starting sentence should begin with"
+            " <Start> and end with </Start>. The starting sentence should be"
+            " concise, effective, and generally applicable to all QA pairs"
+            " above."
+        )
+      else:
+        meta_prompt += (
+            "\n\nGenerate an instruction that"
+            " is different from all the instructions <INS> above,"
+            " and has a higher score than all the instructions <INS> above."
+            " The instruction should begin with <INS> and end with </INS>."
+            " The instruction should be concise, effective,"
+            " and generally applicable to all problems above."
+        )
   else:
     # when using a pre-trained model as optimizer
     assert meta_prompt_type == "instructions_only"
@@ -310,6 +353,8 @@ def gen_meta_prompt(
       instruction_task_description = "grade school math"
     elif dataset_name == "mmlu":
       instruction_task_description = task_name
+    elif dataset_name == "aime":
+      instruction_task_description = "AIME math problems"
     else:
       assert dataset_name == "bbh"
       instruction_task_description = " ".join(task_name.split("_"))
@@ -405,6 +450,7 @@ def run_evolution(**kwargs):
       "mmlu",
       "bbh",
       "gsm8k",
+      "aime"
   }, "The lower-case dataset name must be one of mmlu, bbh, gsm8k."
   assert optimizer_llm_temperature_schedule in {
       "constant",
@@ -479,6 +525,9 @@ def run_evolution(**kwargs):
     is_multiple_choice = True
     is_multiple_choice_eval = True
   elif dataset_name in {"gsm8k"}:
+    is_multiple_choice = False
+    is_multiple_choice_eval = False
+  elif dataset_name == "aime":
     is_multiple_choice = False
     is_multiple_choice_eval = False
   else:
@@ -760,12 +809,29 @@ def run_evolution(**kwargs):
               end_index = raw_output.index(end_string)
             new_inst = raw_output[start_index:end_index].strip()
             generated_instructions_raw.append(new_inst)
-        else:
-          assert optimizer_llm_name.lower() == "text-bison"
+        elif optimizer_llm_name.lower() == "text-bison":
           generated_instructions_raw += [
               extract_string_in_square_brackets(string)
               for string in raw_outputs
           ]
+        else:
+          if instruction_pos == "A_begin":
+            start_string = "<Start>"
+            end_string = "</Start>"
+          else:
+            start_string = "<INS>"
+            end_string = "</INS>"
+          for raw_output in raw_outputs:
+            if start_string not in raw_output:
+              start_index = 0
+            else:
+              start_index = raw_output.index(start_string) + len(start_string)
+            if end_string not in raw_output:
+              end_index = len(raw_output)
+            else:
+              end_index = raw_output.index(end_string)
+            new_inst = raw_output[start_index:end_index].strip()
+            generated_instructions_raw.append(new_inst)
 
         remaining_num_instructions_to_generate -= optimizer_llm_dict[
             "batch_size"
